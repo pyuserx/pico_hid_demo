@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRMWARE = os.path.join(ROOT, "firmware")
 BACKUP = os.path.join(ROOT, "backup")
 
-FILES = ["boot.py", "hid_usb.py", "hidproto.py", "main.py", "selftest.py"]
+FILES = ["boot.py", "hid_usb.py", "hidproto.py", "main.py", "oled.py", "selftest.py"]
 REMOVE_ON_RESTORE = FILES + ["hid_boot_error.txt"]
 
 

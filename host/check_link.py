@@ -34,8 +34,9 @@ def main():
     if d is None:
         return fail(
             "没找到 Pico HID (usage_page=0xFF00 / usage=0x01)",
-            "① 每次上电后先跑 python tools/activate.py 激活 HID；"
-            "② 必要时拔插 USB 重新上电；③ python host/hid_demo.py list 看设备列表")
+            "① 已自动尝试通过 CDC 串口激活，失败原因见上方 [auto] 日志；"
+            "② 常见原因：Thonny / 串口监视器占用 COM 口，关掉后重试；"
+            "③ 也可手动跑 python tools/activate.py；④ 必要时拔插 USB 重新上电")
 
     print("[1/6] 设备   VID=%04X PID=%04X  iface=%s  %s" % (
         d["vendor_id"], d["product_id"], d.get("interface_number"),

@@ -7,8 +7,10 @@ import time
 import machine
 import hid_usb
 import hidproto as P
+import oled
 
 LED_PIN = 25
+SYS_TIMEOUT_MS = 5000   # 超过这个时间没收到 PC 数据就显示 NO SIGNAL
 
 _led = machine.Pin(LED_PIN, machine.Pin.OUT)
 _adc = [machine.ADC(i) for i in range(4)]
@@ -17,6 +19,10 @@ _adc_temp = machine.ADC(4)
 _stream_ms = 0          # 0 = 不流式上报
 _next_stream = 0
 _stream_counter = 0
+
+_oled_dev = None        # init() 失败时为 None，SYS_INFO 仍正常回 ACK
+_last_sys_ms = 0        # 最近一次收到 PC 系统信息
+_sys_lost = False       # 已显示过 NO SIGNAL，避免重复刷屏
 
 _T0 = time.ticks_ms()
 
@@ -44,7 +50,7 @@ def _reply(cmd, seq, payload=b""):
 
 
 def handle(frame):
-    global _stream_ms, _next_stream
+    global _stream_ms, _next_stream, _last_sys_ms, _sys_lost
     try:
         cmd, seq, payload = P.unpack(frame)
     except ValueError as e:
@@ -102,6 +108,22 @@ def handle(frame):
         _reply(P.CMD_GET_STATS, seq,
                bytes((s["rx"] & 0xFF, s["tx"] & 0xFF, s["err"] & 0xFF)))
 
+    elif cmd == P.CMD_SYS_INFO:
+        info = P.unpack_sysinfo(payload)
+        if info is None:
+            _reply(P.ERR_BAD_FRAME, seq, b"bad sysinfo")
+        else:
+            ok = False
+            try:
+                if _oled_dev is not None:
+                    ok = oled.show_system(_oled_dev, info)
+            except Exception as e:
+                print("[oled] show failed:", e)
+            _last_sys_ms = time.ticks_ms()
+            _sys_lost = False
+            # ACK 第 0 字节：1 = OLED 已刷新，0 = 屏不可用
+            _reply(P.CMD_SYS_INFO, seq, bytes((1 if ok else 0,)))
+
     else:
         _reply(P.ERR_BAD_CMD, seq, bytes((cmd,)))
 
@@ -127,14 +149,33 @@ def stream_tick():
         _next_stream = time.ticks_ms()
 
 
+def sys_tick():
+    """上位机停止推送时提示一次 NO SIGNAL，不反复刷屏。"""
+    global _sys_lost
+    if _oled_dev is None or _last_sys_ms == 0 or _sys_lost:
+        return
+    if time.ticks_diff(time.ticks_ms(), _last_sys_ms) < SYS_TIMEOUT_MS:
+        return
+    _sys_lost = True
+    try:
+        oled.show_banner(_oled_dev, "NO PC SIGNAL", "WAITING USB...")
+    except Exception:
+        pass
+
+
 def main():
+    global _oled_dev
     print("[main] custom HID demo started")
+    _oled_dev = oled.init()
+    if _oled_dev is None:
+        print("[main] OLED unavailable, SYS_INFO still acked")
     while True:
         hid_usb.poll()
         frame = hid_usb.recv()
         if frame is not None:
             handle(frame)
         stream_tick()
+        sys_tick()
         time.sleep_ms(1)
 
 

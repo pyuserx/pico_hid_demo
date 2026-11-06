@@ -39,7 +39,9 @@ def _ensure():
     if _dev is None:
         info = find_device()
         if info is None:
-            raise PicoError("未找到 Pico 自定义 HID。先确认设备已上电、并运行过 tools/activate.py")
+            raise PicoError(
+                "未找到 Pico 自定义 HID（已自动尝试激活，原因见服务端 [auto] 日志）。"
+                "常见原因：Thonny 占用 COM 口；也可手动跑 tools/activate.py 或双击 activate.bat")
         _dev = PicoHID(info=info)
         _dev_label = "%04X:%04X  %s  [%s]" % (
             info["vendor_id"], info["product_id"],

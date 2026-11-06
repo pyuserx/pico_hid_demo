@@ -10,6 +10,8 @@
     python hid_demo.py uptime / stats
     python hid_demo.py stream 100 3         # 每 100ms 主动上报，收 3 秒
     python hid_demo.py bench 200            # 回环压测（RTT / 吞吐）
+    python hid_demo.py sysinfo               # 单次推送 PC 占用到 OLED12864
+    python hid_demo.py sysmon --interval 1   # 持续推送 PC 占用到 OLED
     python hid_demo.py repl                 # 交互模式
 """
 from __future__ import annotations
@@ -88,9 +90,20 @@ def run(dev: PicoHID, argv) -> str:
         return ("BENCH  %d 次 ECHO  成功=%d 失败=%d  总耗时=%.3f s  "
                 "平均RTT=%.2f ms  有效载荷≈%.0f B/s" % (n, ok, fail, dt, avg, goodput))
 
+    if cmd == "sysinfo":
+        import time
+        import sysinfo as _si
+        _si.warmup()
+        time.sleep(0.2)
+        s = _si.sample()
+        ok = dev.sysinfo(s["cpu"], s["mem"], s["disk"], gpu=s["gpu"], host=s["host"])
+        return ("SYSINFO CPU=%d%% MEM=%d%% DISK=%d%% HOST=%s OLED=%s" % (
+            s["cpu"], s["mem"], s["disk"], s["host"], "OK" if ok else "无屏/失败"))
+
     if cmd in ("help", "?"):
         return ("命令: ping / echo <text> / info / led on|off|read / adc <0..3> / temp / "
-                "uptime / stats / stream <ms> <秒> / bench <n> / quit")
+                "uptime / stats / stream <ms> <秒> / bench <n> / sysinfo / "
+                "quit（持续推送用 sysmon 子命令）")
 
     return "未知命令：%s（输入 help）" % cmd
 
@@ -120,18 +133,30 @@ def main(argv=None):
     ap.add_argument("--path", default=None, help="直接指定 hidapi 设备路径")
     ap.add_argument("--mode", choices=[m[0] for m in WRITE_MODES], default=None,
                     help="跳过握手，强制指定写入格式（id0=首字节补0 / raw=裸64B）")
+    ap.add_argument("--no-auto", action="store_true",
+                    help="关闭自动激活 HID，只连接已枚举的设备")
     ap.add_argument("command", nargs="*", help="命令及参数，留空进入交互模式")
     a = ap.parse_args(argv)
+
+    if a.no_auto:
+        import os
+        os.environ["PICO_HID_NO_AUTO_ACTIVATE"] = "1"
 
     if a.command and a.command[0].lower() == "list":
         print("系统 HID 设备：")
         list_devices()
         print("\n目标：VID=%04X PID=%04X usage_page=0x%04X usage=0x%02X" % (
             a.vid, a.pid, VENDOR_USAGE_PAGE, VENDOR_USAGE))
-        d = find_device(None if a.vid == 0 else a.vid, None if a.pid == 0 else a.pid)
+        d = find_device(None if a.vid == 0 else a.vid, None if a.pid == 0 else a.pid,
+                        auto_activate=False)   # 只看设备列表，不碰板子
         print("匹配：", ("找到 -> %s / %s" % (d.get("manufacturer_string"),
                                             d.get("product_string"))) if d else "未找到")
         return 0
+
+    # 持续推送会自己建 HID 句柄，不能和下面的 dev 同时打开
+    if a.command and a.command[0].lower() == "sysmon":
+        import sysmon
+        return sysmon.main(a.command[1:])
 
     try:
         dev = PicoHID(vid=None if a.vid == 0 else a.vid,

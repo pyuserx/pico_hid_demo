@@ -11,12 +11,16 @@ import os
 import sys
 import time
 import struct
+import datetime
 import hid
 
-_FIRMWARE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "firmware")
-if _FIRMWARE not in sys.path:
-    sys.path.insert(0, _FIRMWARE)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_FIRMWARE = os.path.join(os.path.dirname(_HERE), "firmware")
+for _p in (_HERE, _FIRMWARE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 import hidproto as P  # noqa: E402  —— 与下位机共用同一份协议定义
+import auto_activate as _auto  # noqa: E402 —— 开上位机时自动激活下位机 HID
 
 REPORT_LEN = 64
 DEFAULT_VID = 0x2E8A
@@ -28,7 +32,8 @@ VENDOR_USAGE = 0x01
 CMD = {name: getattr(P, name) for name in (
     "CMD_PING", "CMD_ECHO", "CMD_GET_INFO", "CMD_LED_WRITE", "CMD_LED_READ",
     "CMD_ADC_READ", "CMD_TEMP_READ", "CMD_UPTIME", "CMD_STREAM_START",
-    "CMD_STREAM_STOP", "CMD_GET_STATS", "EVT_STATUS", "ERR_BAD_CMD", "ERR_BAD_FRAME",
+    "CMD_STREAM_STOP", "CMD_GET_STATS", "CMD_SYS_INFO", "EVT_STATUS",
+    "ERR_BAD_CMD", "ERR_BAD_FRAME",
 )}
 ERR_CODES = {0xC0: "未知命令", 0xC1: "非法帧 / 参数"}
 
@@ -37,7 +42,8 @@ CMD_NAMES = {
     P.CMD_LED_WRITE: "LED_W", P.CMD_LED_READ: "LED_R", P.CMD_ADC_READ: "ADC",
     P.CMD_TEMP_READ: "TEMP", P.CMD_UPTIME: "UPTIME",
     P.CMD_STREAM_START: "STREAM_ON", P.CMD_STREAM_STOP: "STREAM_OFF",
-    P.CMD_GET_STATS: "STATS", P.EVT_STATUS: "EVENT",
+    P.CMD_GET_STATS: "STATS", P.CMD_SYS_INFO: "SYS_INFO",
+    P.EVT_STATUS: "EVENT",
 }
 
 
@@ -57,27 +63,46 @@ def list_devices(verbose=True):
     return items
 
 
-def find_device(vid=DEFAULT_VID, pid=DEFAULT_PID, path=None):
-    """定位 Pico：严格匹配 usage_page=0xFF00 / usage=0x01，避免误连别的厂商 HID。"""
-    items = hid.enumerate()
-    if path is not None:
-        for d in items:
-            if d["path"] == path:
-                return d
-        raise PicoError("指定的 HID path 不存在")
+def find_device(vid=DEFAULT_VID, pid=DEFAULT_PID, path=None, auto_activate=None):
+    """定位 Pico：严格匹配 usage_page=0xFF00 / usage=0x01，避免误连别的厂商 HID。
 
-    def ok(d, strict):
-        if d.get("usage_page") != VENDOR_USAGE_PAGE or d.get("usage") != VENDOR_USAGE:
-            return False
-        if strict:
-            return (vid is None or d["vendor_id"] == vid) and (pid is None or d["product_id"] == pid)
-        return True
+    找不到时默认自动激活下位机 HID（通过 CDC 串口下发 start() + main.main()），
+    这样「打开上位机就能连」。传 auto_activate=False 或设置环境变量
+    PICO_HID_NO_AUTO_ACTIVATE=1 可关闭；`hid_demo.py list` 用 False 只看不动板子。
+    """
+    def scan():
+        items = hid.enumerate()
+        if path is not None:
+            for d in items:
+                if d["path"] == path:
+                    return d
+            raise PicoError("指定的 HID path 不存在")
 
-    for strict in (True, False):
-        hit = [d for d in items if ok(d, strict)]
-        if hit:
-            return hit[0]
-    return None
+        def ok(d, strict):
+            if d.get("usage_page") != VENDOR_USAGE_PAGE or d.get("usage") != VENDOR_USAGE:
+                return False
+            if strict:
+                return ((vid is None or d["vendor_id"] == vid)
+                        and (pid is None or d["product_id"] == pid))
+            return True
+
+        for strict in (True, False):
+            hit = [d for d in items if ok(d, strict)]
+            if hit:
+                return hit[0]
+        return None
+
+    dev = scan()
+    if dev is not None or path is not None:
+        return dev
+
+    if auto_activate is None:
+        auto_activate = _auto.is_enabled()
+    if not auto_activate:
+        return None
+
+    ok, _ = _auto.ensure_hid()
+    return scan() if ok else None
 
 
 # hidapi 在不同平台/版本上，对「无 Report ID 的 64 字节报告」的写入格式略有差异：
@@ -98,9 +123,13 @@ class PicoHID:
         if self.device_info is None:
             raise PicoError(
                 "未找到 Pico 自定义 HID（usage_page=0xFF00, usage=0x01）。\n"
-                "  1) 每次上电后先运行 python tools/activate.py 激活 HID；\n"
-                "  2) 必要时拔插 USB 重新上电（复位后不会自动重新枚举）；\n"
-                "  3) 用 `python host/hid_demo.py list` 看现有 HID 设备。")
+                "  已自动尝试通过 CDC 串口激活，失败原因：%s\n"
+                "  可手动处理：\n"
+                "    1) 关掉占用 COM 口的程序（Thonny / 串口监视器）后重开上位机；\n"
+                "    2) 或运行 python tools/activate.py（也可双击 activate.bat）；\n"
+                "    3) 必要时拔插 USB 重新上电（复位后不会自动重新枚举）；\n"
+                "    4) 用 `python host/hid_demo.py list` 看现有 HID 设备。" % (
+                    _auto.last_message() or "自动激活被关闭 / 未知原因"))
         self.h = None
         self.mode = None
         self.seq = 0
@@ -257,6 +286,15 @@ class PicoHID:
     def stats(self):
         d = self.transact(P.CMD_GET_STATS)
         return {"rx": d[0], "tx": d[1], "err": d[2]} if len(d) >= 3 else {}
+
+    def sysinfo(self, cpu, mem, disk, gpu=None, host="", timeout=2.0):
+        """把 PC 系统占用发到下位机 OLED；返回 True 表示屏幕已刷新。"""
+        now = datetime.datetime.now()
+        payload = P.pack_sysinfo(cpu, mem, disk, gpu=gpu,
+                                 hour=now.hour, minute=now.minute,
+                                 second=now.second, host=host)
+        ack = self.transact(P.CMD_SYS_INFO, payload, timeout)
+        return bool(ack and ack[0])
 
     def stream_start(self, period_ms=100):
         d = self.transact(P.CMD_STREAM_START, bytes((period_ms & 0xFF, period_ms >> 8)))
